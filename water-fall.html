@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+  <style>
+    .ruler {
+      position: fixed;
+      left: -100px;
+      top: -100px;
+      display: flex;
+      border: 1px dashed skyblue;
+      align-items: flex-end;
+      justify-content: center;
+      font-size: 12px;
+      color: #0c0d0e;
+    }
+    .none {
+      display: none;
+    }
+    .no-select {
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="ruler none" id="ruler"></div>
+  <div>
+    <input type="file" id="file">
+  </div>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    /**
+     * console.timeStamp(label)
+     * label 规则，举例：
+     * 1: 某个动作的时刻
+     *   // some codes...
+     *   console.timeStamp?.(`CustomEventName`);
+     *   // some codes...
+     * 
+     * 2: 某段代码的执行前后
+     *   console.timeStamp?.(`CustomEventName_Start`);
+     *   // some codes...
+     *   console.timeStamp?.(`CustomEventName_End`);
+     * 
+     * 3: 某个可能重复执行的函数，用来标记区分每一次的执行
+     *   const ts = performance.now();
+     *   console.timeStamp?.(`CustomEventName_${ts}_Start`);
+     *   // some codes...
+     *   console.timeStamp?.(`CustomEventName_${ts}_End`);
+     */
+    const ruler = document.querySelector('#ruler');
+    const ctxLineColor1 = '#dde2e9';
+    const ctxLineColor2 = '#86909C';
+    const ctxTimeBlockColor = '#00b42a';
+    const ctxTimeBlockMomentColor = '#d7312a';
+    const ctxTimeBlockRepeatColor = '#1664ff';
+    const ctxTextColor = '#0c0d0e';
+    const ctxPadding = 20;
+    const chartConfig = {
+      // 横轴总时长，单位秒
+      totalDuration: 10,
+    };
+    const h = 900;
+    const w = document.body.clientWidth;
+    const cw = w - 2 * ctxPadding;
+    const ch = h - 2 * ctxPadding;
+    const canvas = document.querySelector('#canvas');
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+
+    // 处理像素
+    const dpr = window.devicePixelRatio; 
+    canvas.width = dpr * w;
+    canvas.height = dpr * h;
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.lineWidth = 1;
+    ctx.imageSmoothingEnabled = false;
+
+    function drawAxis() {
+      ctx.save();
+      ctx.beginPath();
+
+      ctx.strokeStyle = ctxLineColor2;
+      ctx.fillStyle = ctxLineColor2;
+      const y = h - ctxPadding;
+      ctx.moveTo(ctxPadding, y);
+      ctx.lineTo(w - ctxPadding, y);
+      ctx.stroke();
+
+      const totalSeconds = Math.ceil(chartConfig.totalDuration);
+      const bigStep = cw / totalSeconds;
+      const smallStep = bigStep / 10;
+      for(let i = 0; i <= totalSeconds; i++) {
+        ctx.beginPath();
+        const x = i * bigStep + ctxPadding;
+        ctx.moveTo(x, ctxPadding);
+        ctx.lineTo(x, y + 0.75 * ctxPadding);
+        ctx.stroke();
+        ctx.fillText(i, x + 4, y + 12);
+
+        for(let j = 1; j < 10; j++) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.strokeStyle = ctxLineColor1;
+          const xj = x + j * smallStep;
+          ctx.setLineDash([2, 2]);
+          ctx.moveTo(xj, ctxPadding);
+          ctx.lineTo(xj, y + 0.25 * ctxPadding);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      ctx.restore();
+    }
+
+    function handleFileChange(ev) {
+      const file = ev.target.files[0];
+      if(file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const json = JSON.parse(reader.result);
+            const blocks = resolveJsonData(json);
+            clearCanvas();
+            drawAxis();
+            drawTimeBlocks(blocks);
+          } catch (e) {
+            // alert('解析文件失败，是否是正确的JSON格式？');
+            throw e
+          }
+        };
+        reader.readAsText(file);
+      }
+    };
+
+    // 处理json数据
+    function resolveJsonData(json) {
+      const moments = [];
+      const timeBlocks = [];
+      let startTime = void 0;
+      json.traceEvents.forEach(ev => {
+        if(ev.name === 'TimeStamp') {
+          moments.push({
+            time: (ev.ts - startTime) / 1e6,
+            tag: ev.args.data.message,
+            raw: ev,
+          });
+        } else if(ev.name === 'navigationStart') {
+          // HTML开始加载时间
+          if(startTime === void 0) {
+            startTime = ev.ts;
+          } else {
+            timeBlocks.push({
+              start: { time: 0 },
+              end: { time: (ev.ts - startTime) / 1e6 },
+              eventTag: 'LoadHTML'
+            });
+          }
+        }
+      });
+      const temp = {};
+      const reg = /(_End|_Start)$/;
+      moments.forEach(m => {
+        if(reg.test(m.tag)) {
+          const [prefix, order] = m.tag.split(reg);
+          // 假设同一类事件的Start和End是依次关系的，且只有完整完成前一个同类事件后才可能会重新发生同类事件
+          if(temp[prefix]) {
+            temp[prefix].end = m;
+            timeBlocks.push(temp[prefix]);
+            temp[prefix] = void 0;
+          } else {
+            temp[prefix] = {
+              start: m,
+              eventTag: prefix,
+            };
+          }
+        } else {
+          timeBlocks.push({
+            start: m,
+            eventTag: m.tag
+          });
+        }
+      });
+      Object.values(temp).forEach(it => (!!it && timeBlocks.push(it)));
+      timeBlocks.sort((a, b) => a.start.time - b.start.time);
+      return timeBlocks;
+    }
+
+    // 绘制时间块
+    function drawTimeBlocks(blocks) {
+      const gap = 2;
+      const bh = 12;
+      const tagSet = new Set();
+
+      ctx.save();
+      ctx.font = '8px';
+
+      for(let i = 0; i < blocks.length; i++) {
+        const b = blocks[i];
+        const x = b.start.time / chartConfig.totalDuration * cw + ctxPadding;
+        const y = i * (gap + bh) + ctxPadding;
+        const bw = b?.end?.time ? (b.end.time - b.start.time) / chartConfig.totalDuration * cw : 0;
+
+        // 移除time的后缀，如果有的话
+        const eventTag = b.eventTag.replace(/_[0-9.]+$/, '');
+
+        ctx.fillStyle = b.end ? (tagSet.has(eventTag) ? ctxTimeBlockRepeatColor : ctxTimeBlockColor) : ctxTimeBlockMomentColor;
+        tagSet.add(eventTag);
+        ctx.fillRect(x, y, Math.max(bw, 1), bh);
+
+        ctx.fillStyle = ctxTextColor;
+        ctx.fillText(eventTag + (b?.end?.time ? `: ${(b.end.time - b.start.time).toFixed(2)}s` : ''), x + 2, y + 9)
+      }
+      ctx.restore();
+    }
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function handleMouseDown(ev) {
+      const { clientX: originX, clientY: originY } = ev;
+
+      ruler.classList.remove('none');
+      document.body.classList.add('no-select');
+
+      const moveFn = (moveEv) => {
+        const { clientX, clientY } = moveEv;
+        const dx = clientX - originX;
+        const dy = clientY - originY;
+
+        if(dx >= 0) {
+          ruler.style.left = originX + 'px';
+        } else {
+          ruler.style.left = originX + dx + 'px';
+        }
+
+        if(dy >= 0) {
+          ruler.style.top = originY + 'px';
+        } else {
+          ruler.style.top = originY + dy + 'px';
+        }
+
+        ruler.style.width = Math.abs(dx) + 'px';
+        ruler.style.height = Math.abs(dy) + 'px';
+
+        ruler.innerText = (Math.abs(dx) / cw * chartConfig.totalDuration).toFixed(2) + 's';
+      };
+      const upFn = () => {
+        document.body.classList.remove('no-select');
+        ruler.classList.add('none');
+        ruler.style.width = 0;
+        ruler.style.height = 0;
+        ruler.style.left = 'unset';
+        ruler.style.top = 'unset';
+        document.removeEventListener('mousemove', moveFn);
+        document.removeEventListener('mouseup', upFn);
+      }
+      document.addEventListener('mousemove', moveFn);
+      document.addEventListener('mouseup', upFn)
+    }
+
+    function main() {
+      document.querySelector('#file').onchange = handleFileChange;
+      canvas.onmousedown = handleMouseDown;
+      drawAxis();
+    }
+
+    main();
+  </script>
+</body>
+</html>
