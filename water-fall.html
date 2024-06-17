@@ -57,13 +57,16 @@
     const ctxTimeBlockColor = '#00b42a';
     const ctxTimeBlockMomentColor = '#d7312a';
     const ctxTimeBlockRepeatColor = '#1664ff';
+    const ctxTimeBlockSystemColor = '#b37feb';
+    const ctxTimeBlockResourceColor = '#faad14'
+    const ctxTimeBlockEvalColor = '#ad6800'
     const ctxTextColor = '#0c0d0e';
     const ctxPadding = 20;
     const chartConfig = {
       // 横轴总时长，单位秒
       totalDuration: 10,
     };
-    const h = 900;
+    const h = 800;
     const w = document.body.clientWidth;
     const cw = w - 2 * ctxPadding;
     const ch = h - 2 * ctxPadding;
@@ -138,12 +141,24 @@
         reader.readAsText(file);
       }
     };
-
+    
     // 处理json数据
     function resolveJsonData(json) {
       const moments = [];
       const timeBlocks = [];
       let startTime = void 0;
+      let htmlDone = false;
+      // 展示部分浏览器性能指标
+      const nameMap = {
+        'largestContentfulPaint::Candidate': 'LCP',
+        firstPaint: 'FP',
+        firstContentfulPaint: 'FCP',
+      };
+      const systemMomentNames = new Set(Object.keys(nameMap));
+      // 匹配需要展示的静态资源
+      const resourceEventMap = {};
+      const resourceUrlMap = {};
+      const urlReg = /obj\/static\/iaas-.*\/static\/js\/.*\.js$/;
       json.traceEvents.forEach(ev => {
         if(ev.name === 'TimeStamp') {
           moments.push({
@@ -151,15 +166,62 @@
             tag: ev.args.data.message,
             raw: ev,
           });
-        } else if(ev.name === 'navigationStart') {
-          // HTML开始加载时间
-          if(startTime === void 0) {
-            startTime = ev.ts;
-          } else {
+        } else if(ev.name === 'navigationStart' && startTime === void 0) {
+          // 页面开始加载
+          startTime = ev.ts;
+        } else if (ev.name === 'domInteractive' && !htmlDone) {
+          // HTML下载完成
+          timeBlocks.push({
+            start: { time: 0 },
+            end: { time: (ev.ts - startTime) / 1e6 },
+            eventTag: 'LoadHTML',
+            type: 'html',
+          });
+          htmlDone = true;
+        } else if(ev.name === 'ResourceSendRequest') {
+          // 资源请求
+          const requestId = ev.args.data.requestId;
+          if(urlReg.test(ev.args.data.url)) {
+            if (!resourceEventMap[requestId]) resourceEventMap[requestId] = { requestId, raws: [] };
+            const req = resourceEventMap[requestId];
+            req.raws.push(ev);
+            !req.start && (req.start = ev.ts - startTime);
+            // 取出文件名
+            const fileName = ev.args.data.url.match(/.*\/(.*?)$/)?.[1] || ev.args.data.url;
+            !req.fileName && ((req.fileName = fileName));
+            !req.url && (req.url = ev.args.data.url);
+            resourceUrlMap[ev.args.data.url] = req;
+          }
+        } else if(ev.name === 'ResourceReceiveResponse') {
+          const req = resourceEventMap[ev.args.data.requestId];
+          req?.raws.push(ev);
+        } else if(ev.name === 'ResourceFinish') {
+          const req = resourceEventMap[ev.args.data.requestId];
+          req?.raws.push(ev);
+          req && !req.end && (req.end = ev.ts - startTime);
+          req && timeBlocks.push({
+            start: { time: req.start / 1e6 },
+            end: { time: req.end / 1e6 },
+            eventTag: req.fileName,
+            type: 'resource',
+          });
+        } else if(ev.name === 'EvaluateScript' && resourceUrlMap[ev.args?.data?.url]) {
+          const start = ev.ts - startTime
+          const url = ev.args.data.url.match(/.*\/(.*?)$/)?.[1] || ev.args.data.url;
+          timeBlocks.push({
+            start: { time: start / 1e6 },
+            end: { time: (start + ev.dur) / 1e6 },
+            eventTag: resourceUrlMap[ev.args.data.url].fileName,
+            type: 'eval',
+          });
+        } else {
+          // 匹配浏览器的一些指标
+          const name = systemMomentNames.has(ev.name);
+          if(name) {
             timeBlocks.push({
-              start: { time: 0 },
-              end: { time: (ev.ts - startTime) / 1e6 },
-              eventTag: 'LoadHTML'
+              start: { time: (ev.ts - startTime) / 1e6 },
+              eventTag: `${nameMap[ev.name]}_System`,
+              type: 'system',
             });
           }
         }
@@ -210,12 +272,22 @@
         // 移除time的后缀，如果有的话
         const eventTag = b.eventTag.replace(/_[0-9.]+$/, '');
 
-        ctx.fillStyle = b.end ? (tagSet.has(eventTag) ? ctxTimeBlockRepeatColor : ctxTimeBlockColor) : ctxTimeBlockMomentColor;
+        if(b.type === 'system') {
+          ctx.fillStyle = ctxTimeBlockSystemColor;
+        } else if(b.type === 'resource') {
+          ctx.fillStyle = ctxTimeBlockResourceColor;
+        } else if(b.type === 'eval') {
+          ctx.fillStyle = ctxTimeBlockEvalColor;
+        } else {
+          ctx.fillStyle = b.end ? (tagSet.has(eventTag) ? ctxTimeBlockRepeatColor : ctxTimeBlockColor) : ctxTimeBlockMomentColor;
+        }
         tagSet.add(eventTag);
-        ctx.fillRect(x, y, Math.max(bw, 1), bh);
+        ctx.fillRect(x, y, Math.max(bw, 2), bh);
 
         ctx.fillStyle = ctxTextColor;
-        ctx.fillText(eventTag + (b?.end?.time ? `: ${(b.end.time - b.start.time).toFixed(2)}s` : ''), x + 2, y + 9)
+        const startTime = b.start.time.toFixed(2);
+        const text = eventTag + (b?.end?.time ? `: (dur: ${(b.end.time - b.start.time).toFixed(2)}s)` : '') + ` (start: ${startTime}s)`;
+        ctx.fillText(text, x + 2, y + 9)
       }
       ctx.restore();
     }
